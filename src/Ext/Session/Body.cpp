@@ -27,14 +27,23 @@
 #include <Unsorted.h>
 #include <IPX.h>
 #include <IPXManagerClass.h>
+#include <LoadOptionsClass.h>
+#include <MessageListClass.h>
+#include <RulesClass.h>
+#include <GameStrings.h>
 
+#include <Utilities/Debug.h>
 #include <Utilities/Macro.h>
 
 #include <cwchar>
+#include <cstring>
 
 bool SessionExt::IsOutOfSync[SessionExt::MaxPlayers] = {};
 int SessionExt::OutOfSyncFrame = -1;
 bool SessionExt::IsChatToAllies = false;
+
+std::optional<std::chrono::steady_clock::time_point> SessionExt::PendingMultiplayerSaveLoadTime;
+char SessionExt::PendingMultiplayerSaveLoadFile[28] = {};
 
 bool SessionExt::Is_Out_of_Sync(int house_id)
 {
@@ -157,6 +166,106 @@ void SessionExt::Update_Master_After_Player_Removal()
 
 	if (new_master != -1 && new_master != current)
 		Set_Master(new_master);
+}
+
+void SessionExt::Schedule_Multiplayer_Load(const char* filename, bool broadcast)
+{
+	if (!Is_Spawner_Session() || SessionClass::Instance.GameMode != GameMode::LAN)
+		return;
+
+	if (filename == nullptr || filename[0] == '\0')
+		return;
+
+	// Don't schedule twice; the first request wins.
+	if (PendingMultiplayerSaveLoadTime.has_value())
+		return;
+
+	std::strncpy(PendingMultiplayerSaveLoadFile, filename, sizeof(PendingMultiplayerSaveLoadFile) - 1);
+	PendingMultiplayerSaveLoadFile[sizeof(PendingMultiplayerSaveLoadFile) - 1] = '\0';
+
+	PendingMultiplayerSaveLoadTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(LOAD_COUNTDOWN_MS);
+
+	Debug::Log("SessionExt: scheduled multiplayer save load of '%s' in %d ms (broadcast=%d).\n",
+		PendingMultiplayerSaveLoadFile, LOAD_COUNTDOWN_MS, broadcast);
+
+	// Let everyone know a load is coming. (Harmless while the desync dialog is
+	// open - it shows its own countdown and the message list isn't drawn then.)
+	MessageListClass::Instance.PrintMessage(
+		StringTable::TryFetchString("TXT_DESYNC_LOAD_COUNTDOWN", L"The game host is loading a saved game..."),
+		RulesClass::Instance->MessageDelay,
+		HouseClass::CurrentPlayer != nullptr ? HouseClass::CurrentPlayer->ColorSchemeIndex : -1,
+		true);
+
+	if (!broadcast)
+		return;
+
+	// Host: tell the other players which file to load.
+	ExtGlobalPacketType packet {};
+	packet.Command = EXT_NET_LOAD_GAME;
+	std::strncpy(packet.SaveLoad.FileName, PendingMultiplayerSaveLoadFile, sizeof(packet.SaveLoad.FileName) - 1);
+
+	auto& players = NodeNameType::Array;
+	for (int i = 1; i < players.Count; i++)
+	{
+		NodeNameType* const node = players[i];
+		if (node == nullptr)
+			continue;
+
+		IPXManagerClass::Instance.Send_Global_Message(
+			&packet, sizeof(packet), 1,
+			reinterpret_cast<IPXAddressClass*>(&node->Address), 0, 0);
+	}
+	IPXManagerClass::Instance.Service();
+}
+
+bool SessionExt::Load_Multiplayer_Save(const char* filename)
+{
+	if (filename == nullptr || filename[0] == '\0')
+		return false;
+
+	Debug::Log("SessionExt: loading multiplayer save '%s' on frame %d.\n", filename, Unsorted::CurrentFrame);
+
+	// Load the saved game (routed to the saved-games subdir by the existing
+	// SavedGamesInSubdir hooks; shows the "please wait" box).
+	if (!LoadOptionsClass::LoadMission(filename))
+	{
+		Debug::Log("SessionExt: LoadMission('%s') failed.\n", filename);
+		return false;
+	}
+
+	// Tell the event-queue logic to re-perform the post-scenario-load handshake
+	// and set the initial networking delay; it clears the flag itself.
+	SessionClass::Instance.LoadGame = 1;
+
+	// Anyone out of sync before the reload is back in sync now.
+	Clear_Out_Of_Sync_Data();
+
+	// Tear down and rebuild the connections, the same way the spawner does at
+	// game start, so the session continues cleanly after the reload.
+	auto& players = NodeNameType::Array;
+	for (int i = 0; i < players.Count; i++)
+	{
+		NodeNameType* const node = players[i];
+		if (node == nullptr)
+			continue;
+
+		IPXManagerClass::Instance.Delete_Connection(node->HouseIndex);
+	}
+
+	if (!Spawner::Reconcile_Players())
+	{
+		Debug::Log("SessionExt: Reconcile_Players failed after load.\n");
+		return false;
+	}
+
+	if (!SessionClass::Instance.CreateConnections())
+	{
+		Debug::Log("SessionExt: CreateConnections failed after load.\n");
+		return false;
+	}
+
+	Debug::Log("SessionExt: multiplayer save load complete.\n");
+	return true;
 }
 
 /**

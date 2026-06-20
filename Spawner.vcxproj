@@ -21,6 +21,7 @@
     <ClCompile Include="src\UI\Hooks.cpp" />
     <ClCompile Include="$(ThisDir)\src\UI\DesyncDialog.cpp" />
     <ClCompile Include="$(ThisDir)\src\UI\DesyncDialog.Hook.cpp" />
+    <ClCompile Include="$(ThisDir)\src\UI\MultiplayerSaveLoad.cpp" />
     <ResourceCompile Include="$(ThisDir)\src\version.rc" />
     <ClCompile Include="$(ThisDir)\src\Main.cpp" />
     <ClCompile Include="$(ThisDir)\src\Main.Config.cpp" />

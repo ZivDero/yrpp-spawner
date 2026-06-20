@@ -55,11 +55,15 @@
 #include <IPX.h>
 #include <IPXManagerClass.h>
 #include <WWMouseClass.h>
+#include <LoadOptionsClass.h>
 #include <Unsorted.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <string>
+#include <system_error>
 #include <windowsx.h>
 
 
@@ -237,27 +241,27 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 			break;
 		}
 
-		// --- Save-load path: ported but DISABLED until multiplayer save-load
-		//     is implemented. The Load button is disabled, so no load is ever
-		//     scheduled and the countdown below never starts.
-#if 0
-		if (!LoadCountdownActive && PendingMultiplayerSaveLoadTime) {
-			Start_Load_Countdown();
-		}
+		/**
+		 *  A multiplayer save load has been scheduled - either we (the host)
+		 *  picked a save, or the host told us to load one. Show the countdown;
+		 *  when it elapses, resume with DESYNC_OUTCOME_LOAD so the game's
+		 *  post-main-loop hook performs the actual reload for everyone.
+		 */
+		if (SessionExt::PendingMultiplayerSaveLoadTime.has_value()) {
 
-		if (LoadCountdownActive) {
+			if (!LoadCountdownActive) {
+				Start_Load_Countdown();
+			}
 
 			Update_Countdown_Text();
 			InvalidateRect(Window, nullptr, FALSE);
 
-			if (std::chrono::steady_clock::now() >= *PendingMultiplayerSaveLoadTime) {
+			if (std::chrono::steady_clock::now() >= *SessionExt::PendingMultiplayerSaveLoadTime) {
 				outcome = DESYNC_OUTCOME_LOAD;
 				break;
 			}
 
-		} else
-#endif
-		if (ContinueReceived || Decision == IDC_DESYNC_CONTINUE) {
+		} else if (ContinueReceived || Decision == IDC_DESYNC_CONTINUE) {
 
 			if (Decision == IDC_DESYNC_CONTINUE) {
 				Send_Continue();
@@ -267,17 +271,22 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 
 		} else if (Decision == IDC_DESYNC_LOAD) {
 
-			// --- Open the stock load dialog so the master can pick a save.
-			//     DISABLED for now (the Load button is disabled); needs the
-			//     multiplayer save-load logic to be ported first.
-#if 0
+			/**
+			 *  Open the stock savegame load dialog so the host can pick a save.
+			 *  Picking one is intercepted (LoadOptionsDialog_InterceptMultiplayerLoad)
+			 *  and turned into a scheduled, broadcast reload; the countdown above
+			 *  then runs. Multiplayer saves use the ".NET" extension.
+			 */
 			KillTimer(Window, HEARTBEAT_TIMER);
 			EnableWindow(Window, FALSE);
-			LoadOptionsClass().Load_Dialog();
+
+			LoadOptionsClass opts;
+			opts.Extension = "NET";
+			opts.LoadDialog();
+
 			EnableWindow(Window, TRUE);
 			SetFocus(GetDlgItem(Window, IDC_DESYNC_PLAYER_LIST));
 			SetTimer(Window, HEARTBEAT_TIMER, HEARTBEAT_INTERVAL_MS, nullptr);
-#endif
 		}
 
 		Decision = 0;
@@ -358,8 +367,8 @@ void DesyncDialogClass::Create_Dialog()
 	Update_Player_List();
 
 	if (IsHostDialog) {
-		// Load is disabled for now (multiplayer save-load is further work).
-		EnableWindow(GetDlgItem(Window, IDC_DESYNC_LOAD), FALSE);
+		// Load is only useful if a multiplayer save actually exists to load.
+		EnableWindow(GetDlgItem(Window, IDC_DESYNC_LOAD), Any_Multiplayer_Save_Exists() ? TRUE : FALSE);
 		EnableWindow(GetDlgItem(Window, IDC_DESYNC_CONTINUE), TRUE);
 	} else {
 
@@ -795,9 +804,15 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 	Debug::Log("DesyncDialog: desync detected on frame %u.\n", current_frame);
 
 	/**
-	 *  (A scheduled multiplayer save load would re-sync everyone instead; that
-	 *  path is deferred until save-load is ported.)
+	 *  If a multiplayer save load is already scheduled, the imminent reload will
+	 *  re-sync everyone - don't open the dialog, just skip executing events until
+	 *  the load happens (the out-of-sync skip hook keeps the diverged players'
+	 *  events out of the DoList in the meantime).
 	 */
+	if (SessionExt::PendingMultiplayerSaveLoadTime.has_value()) {
+		return false;
+	}
+
 	const DesyncDialogOutcomeType outcome = Run();
 
 	switch (outcome) {
@@ -827,23 +842,25 @@ bool DesyncDialogClass::Check_And_Handle_Desync()
 		return true;
 
 	case DESYNC_OUTCOME_LOAD:
-	default:
 		/**
-		 *  A multiplayer save load would happen here; deferred for now, so stop.
+		 *  A multiplayer save load has been scheduled; let the game resume. The
+		 *  post-main-loop hook (Spawner::After_Main_Loop) performs the reload for
+		 *  everyone once the countdown elapses, which re-syncs the session.
 		 */
+		return false;
+
+	default:
 		return true;
 	}
 }
 
 
 /**
- *  Starts the countdown to a scheduled multiplayer save load.
- *
- *  DISABLED: depends on the multiplayer save-load logic, which is further work.
+ *  Starts the countdown to a scheduled multiplayer save load: shows the
+ *  countdown label and stops the host from changing their mind.
  */
 void DesyncDialogClass::Start_Load_Countdown()
 {
-#if 0
 	Debug::Log("DesyncDialog: starting the load countdown.\n");
 
 	LoadCountdownActive = true;
@@ -859,13 +876,13 @@ void DesyncDialogClass::Start_Load_Countdown()
 	ShowWindow(GetDlgItem(Window, IDC_DESYNC_COUNTDOWN_BAR), SW_SHOW);
 	Update_Countdown_Text();
 
+	// Once a load is committed, neither decision is available any more.
 	if (IsHostDialog) {
 		EnableWindow(GetDlgItem(Window, IDC_DESYNC_LOAD), FALSE);
 		EnableWindow(GetDlgItem(Window, IDC_DESYNC_CONTINUE), FALSE);
 	}
 
 	InvalidateRect(Window, nullptr, FALSE);
-#endif
 }
 
 
@@ -876,13 +893,12 @@ void DesyncDialogClass::Start_Load_Countdown()
  */
 void DesyncDialogClass::Update_Countdown_Text()
 {
-#if 0
-	if (!Is_Active() || !LoadCountdownActive || !PendingMultiplayerSaveLoadTime) {
+	if (!Is_Active() || !LoadCountdownActive || !SessionExt::PendingMultiplayerSaveLoadTime.has_value()) {
 		return;
 	}
 
 	using namespace std::chrono;
-	int remaining_ms = static_cast<int>(duration_cast<milliseconds>(*PendingMultiplayerSaveLoadTime - steady_clock::now()).count());
+	int remaining_ms = static_cast<int>(duration_cast<milliseconds>(*SessionExt::PendingMultiplayerSaveLoadTime - steady_clock::now()).count());
 	if (remaining_ms < 0) {
 		remaining_ms = 0;
 	}
@@ -904,22 +920,19 @@ void DesyncDialogClass::Update_Countdown_Text()
 	char buf[64];
 	std::snprintf(buf, std::size(buf), "Loading the saved game in %d second%s...", seconds, seconds == 1 ? "" : "s");
 	SetDlgItemText(Window, IDC_DESYNC_COUNTDOWN_TEXT, buf);
-#endif
 }
 
 
 /**
- *  Draws the load countdown progress bar, the same way the vanilla
- *  reconnection dialog draws its sync bars.
- *
- *  DISABLED: depends on the multiplayer save-load logic, which is further work.
- *  The YR-adapted drawing is kept below for when it is re-enabled.
+ *  Draws the load countdown progress bar, the same way the engine's reconnect
+ *  dialog draws its per-player sync bars (dialog proc 0x64AE50, in WM_PAINT):
+ *  map the placeholder control to surface coordinates with GetDisplayRect, then
+ *  fill a shrinking rectangle on the back buffer (DSurface::Alternate). Called
+ *  from Dialog_Proc on WM_PAINT, after the framework has painted the dialog.
  */
 void DesyncDialogClass::Draw_Countdown_Bar(HWND window)
 {
-	(void)window;
-#if 0
-	if (!LoadCountdownActive || !PendingMultiplayerSaveLoadTime) {
+	if (!LoadCountdownActive || !SessionExt::PendingMultiplayerSaveLoadTime.has_value()) {
 		return;
 	}
 
@@ -929,24 +942,20 @@ void DesyncDialogClass::Draw_Countdown_Bar(HWND window)
 	}
 
 	/**
-	 *  Get the placeholder control's rectangle, relative to the client
-	 *  area of the game's window (which is what the game surfaces map to).
+	 *  Map the placeholder control to display (surface) coordinates, the way the
+	 *  engine's own in-game dialogs position their owner-draw graphics.
 	 */
-	RECT winrect;
-	GetWindowRect(bar, &winrect);
-
-	RECT client {};
-	GetClientRect(Game::hWnd, &client);
-	ClientToScreen(Game::hWnd, reinterpret_cast<POINT*>(&client));
+	RECT rect {};
+	UI::GetDisplayRect(bar, &rect);
 
 	RectangleStruct bar_rect;
-	bar_rect.X = winrect.left - client.left;
-	bar_rect.Y = winrect.top - client.top;
-	bar_rect.Width = winrect.right - winrect.left;
-	bar_rect.Height = winrect.bottom - winrect.top;
+	bar_rect.X = rect.left;
+	bar_rect.Y = rect.top;
+	bar_rect.Width = rect.right - rect.left;
+	bar_rect.Height = rect.bottom - rect.top;
 
 	using namespace std::chrono;
-	int remaining = static_cast<int>(duration_cast<milliseconds>(*PendingMultiplayerSaveLoadTime - steady_clock::now()).count());
+	int remaining = static_cast<int>(duration_cast<milliseconds>(*SessionExt::PendingMultiplayerSaveLoadTime - steady_clock::now()).count());
 	remaining = std::clamp(remaining, 0, LOAD_COUNTDOWN_MS);
 
 	/**
@@ -966,7 +975,6 @@ void DesyncDialogClass::Draw_Countdown_Bar(HWND window)
 
 	RectangleStruct surface_rect = DSurface::Alternate->GetRect();
 	DSurface::Alternate->FillRectEx(&surface_rect, &bar_rect, color);
-#endif
 }
 
 
@@ -1097,6 +1105,12 @@ bool DesyncDialogClass::Handle_Global_Packet(const ExtGlobalPacketType* packet, 
 		SessionExt::Set_Master(packet->Heartbeat.HouseID);
 		return true;
 
+	case EXT_NET_LOAD_GAME:
+		// The host wants everyone to load a multiplayer save. Schedule the same
+		// reload locally (works whether or not the desync dialog is open).
+		SessionExt::Schedule_Multiplayer_Load(packet->SaveLoad.FileName, false);
+		return true;
+
 	case EXT_NET_DESYNC_HEARTBEAT:
 		Notify_Heartbeat(packet->Heartbeat.HouseID, packet->Heartbeat.IsHost != 0);
 		return true;
@@ -1116,13 +1130,34 @@ bool DesyncDialogClass::Handle_Global_Packet(const ExtGlobalPacketType* packet, 
 
 
 /**
- *  Checks if any multiplayer save that is actually loadable in the current
- *  session exists.
- *
- *  DISABLED: multiplayer save-load is further work; always reports none for now.
+ *  Checks whether any loadable multiplayer save exists in the configured saved
+ *  games directory (Phobos writes them as SVGM_###.NET, plus the legacy
+ *  SAVEGAME.NET). Gates whether the host's Load button is offered.
  */
 bool DesyncDialogClass::Any_Multiplayer_Save_Exists()
 {
+	const char* const dir = Spawner::GetConfig() != nullptr ? Spawner::GetConfig()->SavedGameDir : nullptr;
+	if (dir == nullptr || dir[0] == '\0') {
+		return false;
+	}
+
+	std::error_code ec;
+	for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+		if (!it->is_regular_file(ec)) {
+			continue;
+		}
+
+		// Case-insensitive ".net" extension check.
+		std::string ext = it->path().extension().string();
+		if (ext.size() == 4
+			&& (ext[0] == '.')
+			&& (ext[1] == 'n' || ext[1] == 'N')
+			&& (ext[2] == 'e' || ext[2] == 'E')
+			&& (ext[3] == 't' || ext[3] == 'T')) {
+			return true;
+		}
+	}
+
 	return false;
 }
 
@@ -1140,7 +1175,18 @@ BOOL CALLBACK DesyncDialogClass::Dialog_Proc(HWND window, UINT message, WPARAM w
 	 *  consumed the message, we are done. (This is exactly how the engine's own
 	 *  in-game dialogs, e.g. the diplomacy dialog, are written.)
 	 */
-	if (LRESULT handled = UI::StandardWndProc(window, message, wparam, lparam)) {
+	const LRESULT handled = UI::StandardWndProc(window, message, wparam, lparam);
+
+	/**
+	 *  Overlay the load countdown bar after the framework has painted the dialog,
+	 *  exactly the way the engine's reconnect dialog draws its sync bars in
+	 *  WM_PAINT (proc 0x64AE50: Draw_Menu, then the custom bars).
+	 */
+	if (message == WM_PAINT && DesyncDialog.LoadCountdownActive) {
+		DesyncDialog.Draw_Countdown_Bar(window);
+	}
+
+	if (handled) {
 		return static_cast<BOOL>(handled);
 	}
 

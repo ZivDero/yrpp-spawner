@@ -610,6 +610,28 @@ void Spawner::After_Main_Loop()
 {
 	auto pConfig = Spawner::GetConfig();
 
+	// Mid-game multiplayer save load: once the countdown elapses, perform the
+	// reload here - a safe point, after the frame's logic has run. While a load
+	// is pending we also skip autosaving so we don't save over the pending load.
+	if (SessionExt::PendingMultiplayerSaveLoadTime.has_value())
+	{
+		if (std::chrono::steady_clock::now() >= *SessionExt::PendingMultiplayerSaveLoadTime)
+		{
+			SessionExt::PendingMultiplayerSaveLoadTime.reset();
+
+			if (!SessionExt::Load_Multiplayer_Save(SessionExt::PendingMultiplayerSaveLoadFile))
+			{
+				WWMessageBox::Instance.Process(
+					StringTable::LoadString(GameStrings::TXT_ERROR_LOADING_GAME),
+					StringTable::LoadString(GameStrings::TXT_OK),
+					0);
+				ExitProcess(0);
+			}
+		}
+
+		return;
+	}
+
 	const bool doSaveSP =
 		SessionClass::IsSingleplayer()
 		&& pConfig->AutoSaveCount > 0

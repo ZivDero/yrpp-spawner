@@ -40,6 +40,7 @@ enum ExtNetCommandType : int
 	EXT_NET_DESYNC_CONTINUE  = 0xE1, // The host's decision to continue the game without the desynced players.
 	EXT_NET_DESYNC_CHAT      = 0xE2, // A chat line typed in the desync dialog while game logic is halted.
 	EXT_NET_HOST_ANNOUNCE    = 0xE3, // The host announcing itself at game start so everyone records the master.
+	EXT_NET_LOAD_GAME        = 0xE4, // The host telling everyone to load a multiplayer save (carries the save's filename).
 };
 
 #pragma pack(push, 1)
@@ -65,6 +66,11 @@ struct ExtGlobalPacketType
 			char SenderHouseID;
 			char Text[200]; // ANSI chat text.
 		} Chat;
+
+		struct
+		{
+			char FileName[28]; // Save file to load (e.g. "SVGM_003.NET"); identical on every client.
+		} SaveLoad;
 
 		// Forces the whole struct to the engine's GlobalPacketType size so the
 		// IPX layer treats it identically.

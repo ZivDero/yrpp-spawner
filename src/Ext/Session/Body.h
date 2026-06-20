@@ -25,12 +25,22 @@
 
 #pragma once
 
+#include <chrono>
+#include <optional>
+
 class HouseClass;
 
 namespace SessionExt
 {
 	// The engine supports up to 8 multiplayer houses.
 	constexpr int MaxPlayers = 8;
+
+	// --- Mid-game multiplayer save load (ported from Vinifera).
+	//     When a load is scheduled, every client freezes until this time, then
+	//     reloads PendingMultiplayerSaveLoadFile (the same file on all machines).
+	constexpr int LOAD_COUNTDOWN_MS = 5000;
+	extern std::optional<std::chrono::steady_clock::time_point> PendingMultiplayerSaveLoadTime;
+	extern char PendingMultiplayerSaveLoadFile[28];
 
 	// --- Per-player out-of-sync tracking (the engine only has one global flag).
 	//     Populated by the desync-detection hook (to be wired in separately) and
@@ -65,4 +75,15 @@ namespace SessionExt
 	// Recomputes the master after a player has been removed: if the current
 	// master is gone, promotes the first remaining non-defeated human house.
 	void Update_Master_After_Player_Removal();
+
+	// Schedules a multiplayer save load: every machine freezes for ~5s, then
+	// reloads `filename`. On the host (broadcast == true) also tells the other
+	// players which file to load (EXT_NET_LOAD_GAME). No-op outside a spawner
+	// multiplayer session or if a load is already pending.
+	void Schedule_Multiplayer_Load(const char* filename, bool broadcast);
+
+	// Performs the scheduled reload (called after the main loop once the timer
+	// elapses): load the file, re-handshake, and rebuild the connections so the
+	// session continues in sync. Returns false on failure.
+	bool Load_Multiplayer_Save(const char* filename);
 }

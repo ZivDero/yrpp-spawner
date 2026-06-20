@@ -46,11 +46,15 @@ public:
 	static void After_Main_Loop();
 	static void RespondToSaveGame();
 
+	// Reconciles a freshly loaded multiplayer save with the connected players
+	// (matches houses to players by name, turns disconnected humans into AI).
+	// Used at game start and when loading a save mid-session.
+	static bool Reconcile_Players();
+
 private:
 	static bool StartScenario(const char* scenarioName);
 	static bool LoadSavedGame(const char* scenarioName);
 
 	static void InitNetwork();
-	static bool Reconcile_Players();
 	static void LoadSidesStuff();
 };

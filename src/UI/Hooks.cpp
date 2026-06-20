@@ -9,5 +9,5 @@ DEFINE_HOOK(0x609299, UI_IsStaticAndOrOwnerDraw_MultiplayerGameOptionsDialog, 0x
 	enum { RetFalse = 0x609664, RetTrue = 0x609693 };
 
 	GET(int, dlgCtrlID, EAX);
-	return (dlgCtrlID == 1314 || dlgCtrlID == 1313 || dlgCtrlID == 1311) ? RetTrue : RetFalse;
+	return (dlgCtrlID == 1314 || dlgCtrlID == 1313 || dlgCtrlID == 1311 || dlgCtrlID == 1310) ? RetTrue : RetFalse;
 }

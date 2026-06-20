@@ -32,8 +32,10 @@
 //  Hooked in Main_Loop just after the LogicClass::AI call (0x55DCA3), so the
 //  extra draw happens during the frame's logic, before its CRC is computed.
 
-#include <Utilities/Macro.h>
+#include "MessageListClass.h"
+
 #include <Utilities/Debug.h>
+#include <Utilities/Macro.h>
 
 #include <Unsorted.h>
 #include <SessionClass.h>
@@ -74,7 +76,7 @@ DEFINE_HOOK(0x55DCA3, MainLoop_TestForceDesync, 0x5)
 		announced = false;
 	last_frame = frame;
 
-	if (!SessionClass::IsMultiplayer() || frame < 100 || frame > 200)
+	if (!SessionClass::IsMultiplayer() || frame < 1000 || frame > 1100)
 		return 0;
 
 	if (!Is_Designated_Desync_Machine())

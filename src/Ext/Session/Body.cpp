@@ -27,6 +27,7 @@
 #include <Unsorted.h>
 #include <IPX.h>
 #include <IPXManagerClass.h>
+#include <UDPInterfaceClass.h>
 #include <LoadOptionsClass.h>
 #include <MessageListClass.h>
 #include <RulesClass.h>
@@ -225,6 +226,17 @@ bool SessionExt::Load_Multiplayer_Save(const char* filename)
 
 	Debug::Log("SessionExt: loading multiplayer save '%s' on frame %d.\n", filename, Unsorted::CurrentFrame);
 
+	// Throw away any network traffic still in flight so pre-load packets can't
+	// interfere with the state after the load (e.g. stale frame-sync packets the
+	// post-load handshake would otherwise compare and reject as "scenarios don't
+	// match"). Mirrors Vinifera's PacketTransport->Discard_*_Buffers.
+	if (UDPInterfaceClass::Instance != nullptr)
+	{
+		UDPInterfaceClass::Instance->DiscardInBuffers();
+		UDPInterfaceClass::Instance->DiscardOutBuffers();
+		UDPInterfaceClass::Instance->StopListening();
+	}
+
 	// Load the saved game (routed to the saved-games subdir by the existing
 	// SavedGamesInSubdir hooks; shows the "please wait" box).
 	if (!LoadOptionsClass::LoadMission(filename))
@@ -239,6 +251,15 @@ bool SessionExt::Load_Multiplayer_Save(const char* filename)
 
 	// Anyone out of sync before the reload is back in sync now.
 	Clear_Out_Of_Sync_Data();
+
+	// Discard anything that arrived while the save was loading, then re-arm the
+	// listener, so the rebuilt connections start from a clean slate.
+	if (UDPInterfaceClass::Instance != nullptr)
+	{
+		UDPInterfaceClass::Instance->DiscardInBuffers();
+		UDPInterfaceClass::Instance->DiscardOutBuffers();
+		UDPInterfaceClass::Instance->StartListening();
+	}
 
 	// Tear down and rebuild the connections, the same way the spawner does at
 	// game start, so the session continues cleanly after the reload.

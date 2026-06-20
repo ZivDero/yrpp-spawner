@@ -37,6 +37,26 @@
 #include <windows.h>
 
 /**
+ *  Skip the load and take the dialog's "done" path (0x5595A0), discarding the
+ *  filename argument that was pushed at 0x55952F for the Load_File call.
+ *
+ *  Load_File is __thiscall(this, filename) and cleans the pushed argument with
+ *  `retn 4`; since we jump over the call, we must pop those 4 bytes ourselves or
+ *  the dialog's stack is left unbalanced (and it later returns to garbage). At
+ *  0x5595A0 field_18 is the clicked button id (!= -1), so the dialog loop exits
+ *  cleanly. `push/retn` jumps there without clobbering any register.
+ */
+static __declspec(naked) void LoadOptionsDialog_SkipLoad_Stub()
+{
+	__asm
+	{
+		add esp, 4
+		push 0x5595A0
+		retn
+	}
+}
+
+/**
  *  Intercept the savegame load dialog's load action.
  *
  *  LoadOptionsClass::Dialog (0x558DD0), in its Load case, is about to load the
@@ -48,14 +68,10 @@
  *
  *  The 5-byte hook covers the `call` (3) + `test al, al` (2); returning 0 runs
  *  the original local load (singleplayer, and the spawn-time LoadMission path
- *  which does not go through this dialog, are unaffected). Returning 0x5595A0
- *  takes the dialog's "done" path (field_18 is the clicked button id here, so it
- *  is != -1 and the loop exits, ending the dialog) without performing the load.
+ *  which does not go through this dialog, are unaffected).
  */
 DEFINE_HOOK(0x559532, LoadOptionsDialog_InterceptMultiplayerLoad, 0x5)
 {
-	enum { SkipLoadAndCloseDialog = 0x5595A0 };
-
 	if (!SessionExt::Is_Spawner_Session() || SessionClass::Instance.GameMode != GameMode::LAN)
 		return 0; // singleplayer / non-spawner: load normally.
 
@@ -67,7 +83,7 @@ DEFINE_HOOK(0x559532, LoadOptionsDialog_InterceptMultiplayerLoad, 0x5)
 	if (SessionClass::Instance.Am_I_Master())
 		SessionExt::Schedule_Multiplayer_Load(filename, /* broadcast */ true);
 
-	return SkipLoadAndCloseDialog;
+	return reinterpret_cast<DWORD>(&LoadOptionsDialog_SkipLoad_Stub);
 }
 
 
@@ -101,15 +117,26 @@ static __declspec(naked) void QueueAIMultiplayer_ReturnToCaller()
 	__asm { retn }
 }
 
+// Send_Packets (0x649CA0): flush the OutList into the meta-packet and send it.
+//   int __fastcall(ConnManClass* net, char* buf, int metasize, int maxahead, int my_sent)
+using SendPacketsFunc = int(__fastcall*)(void*, char*, int, int, int);
+
 /**
  *  Freeze the simulation while a multiplayer save load is pending.
  *
  *  When a load has been scheduled, every machine must stop advancing the game
  *  until the load happens, so they all reload from the same point and stay in
  *  sync. Queue_AI_Multiplayer (0x6475F0) drives the multiplayer frame; at its
- *  entry, if a load is pending, clear the command queues and just service the
- *  network (Game::CallBack + IPX) until the countdown elapses, then return to
- *  the main loop - Spawner::After_Main_Loop performs the actual reload.
+ *  entry, if a load is pending, clear the command queues, send our frame-sync
+ *  ONCE, then just service the network (Game::CallBack + IPX) until the countdown
+ *  elapses, then return to the main loop - Spawner::After_Main_Loop performs the
+ *  actual reload. Mirrors Vinifera's _Queue_AI_Multiplayer_No_Processing_If_Loading_Save.
+ *
+ *  The Send_Packets is essential: it tells the other players "I have frozen at
+ *  this frame (no further events)", so they can advance to their own freeze point
+ *  instead of blocking in Wait_For_Players waiting for our frame - which would
+ *  leave them pre-load while we reload, and the post-load handshake would then
+ *  reject the state as "scenarios don't match".
  *
  *  This is a no-op during a desync, where the desync dialog already halts the
  *  game and runs its own countdown (so this never sees a pending load there).
@@ -120,8 +147,20 @@ DEFINE_HOOK(0x6475F0, QueueAIMultiplayer_FreezeForPendingLoad, 0x5)
 	if (!SessionExt::PendingMultiplayerSaveLoadTime.has_value())
 		return 0;
 
+	// Session networking globals the function itself reads (see the YR
+	// Queue_AI_Multiplayer): the meta-packet buffer + size, the max-ahead, our
+	// sent-command counter, and the connection manager (Ipx) for LAN/Internet.
+	auto* const send_packets = reinterpret_cast<SendPacketsFunc>(0x649CA0);
+	void* const net = reinterpret_cast<void*>(0xA8E9C0);                  // IPXManagerClass Ipx
+	char* const meta_packet = reinterpret_cast<char*>(0xA8D812);          // Session.MetaPacket
+	const int meta_size = *reinterpret_cast<int*>(0xA8DA40);              // Session.MetaSize
+	const int max_ahead = *reinterpret_cast<int*>(0xA8B550);             // Session.MaxAhead
+	const int my_sent = *reinterpret_cast<unsigned short*>(0xAFA400);    // Queue_AI_Multiplayer::my_sent
+
 	EventClass::DoList.Init();
 	EventClass::OutList.Init();
+
+	send_packets(net, meta_packet, meta_size, max_ahead, my_sent);
 
 	while (std::chrono::steady_clock::now() < *SessionExt::PendingMultiplayerSaveLoadTime) {
 		Game::CallBack();

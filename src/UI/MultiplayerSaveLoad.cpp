@@ -107,6 +107,76 @@ DEFINE_HOOK(0x5587F0, LoadOptionsClass_LoadDialog_MultiplayerExtension, 0x7)
 }
 
 
+// SpecialDialog (0xA8EDA0) is the in-game menu state. The menu loop (Special_Dialog,
+// 0x48C920) opens each sub-dialog (game controls, sound, abort...) by switching on
+// it. A custom value routes the multiplayer Load Game button through that same loop.
+static int& SpecialDialog = *reinterpret_cast<int*>(0xA8EDA0);
+static constexpr int SDLG_NONE = 0;
+static constexpr int EXT_SDLG_LOAD = 20; // unused by the engine's switch (cases 1-9)
+
+/**
+ *  Open the multiplayer Load Game dialog from the in-game menu loop, not nested.
+ *
+ *  Vanilla `GameOptionsClass::Dialog` handles the Load Game button (1310) by
+ *  opening LoadOptionsClass::Dialog *inline*, from inside the button's WM_COMMAND
+ *  handler. That handler runs while `Main_Loop` is on the stack (InMainLoop set),
+ *  and OwnerDraw::DialogMessageHandler (0x623120) only runs Main_Loop/Call_Back
+ *  when InMainLoop is clear - so the nested load dialog's message pump services
+ *  neither the simulation nor the network, and the other players time us out and
+ *  drop the connection. The engine's other menus (Game Controls, etc.) avoid this
+ *  by setting SpecialDialog and returning, letting the top-level Special_Dialog
+ *  loop open them. We do the same for Load: set EXT_SDLG_LOAD and take the dialog's
+ *  clean exit (0x4F14EC sets the result and returns), then open the load dialog at
+ *  the Special_Dialog level below. Singleplayer keeps the vanilla inline behaviour.
+ *
+ *  Fires only on the 1310 (Load Game) branch (after the `wParam == 1310` check).
+ */
+DEFINE_HOOK(0x4F135C, GameOptionsDialog_RouteMultiplayerLoadGame, 0x6)
+{
+	if (!SessionExt::Is_Spawner_Session() || SessionClass::Instance.GameMode != GameMode::LAN)
+		return 0; // singleplayer / non-spawner: open the load dialog inline as normal.
+
+	SpecialDialog = EXT_SDLG_LOAD;
+	return 0x4F14EC; // pop the saved registers, set the dialog result, retn 10h.
+}
+
+/**
+ *  Handle EXT_SDLG_LOAD in the in-game menu loop (Special_Dialog switch dispatch,
+ *  0x48C960, where EAX = the current SpecialDialog value). Open the load dialog at
+ *  this level - where DialogMessageHandler keeps the game/network alive, exactly
+ *  like the engine's own menus (Game Controls, etc.).
+ *
+ *  SpecialDialog is left set to EXT_SDLG_LOAD while the dialog runs: the dialog's
+ *  pump runs Main_Loop, and Main_Loop only renders/handles the tactical map when
+ *  SpecialDialog == SDLG_NONE. Clearing it early lets the game keep drawing the map
+ *  over the (owner-draw) dialog and steal scroll input, leaving the dialog invisible
+ *  - exactly how Game Controls stays visible is by keeping SpecialDialog non-zero.
+ *  The network still runs, so peers don't time out.
+ *
+ *  Leave the menu loop via the ENGINE'S OWN code, not a hand-built cross-function
+ *  jump (that corrupts the stack and crashes). After the dialog returns, clear
+ *  SpecialDialog and set EAX (the switch value) to SDLG_NONE, then `return 0`. The
+ *  engine re-executes the overwritten `lea ecx,[eax-1]; cmp ecx,8`: with eax=0,
+ *  ecx=0xFFFFFFFF > 8, so `ja 0x48C9B0` (default case), whose vanilla
+ *  `cmp eax,ebp; jz 0x48CC37` then exits the loop with the engine's own stack.
+ */
+DEFINE_HOOK(0x48C960, SpecialDialog_OpenMultiplayerLoadGame, 0x6)
+{
+	if (SpecialDialog != EXT_SDLG_LOAD)
+		return 0; // not ours: run the engine's normal switch.
+
+	{
+		LoadOptionsClass opts;
+		opts.Extension = "NET";
+		opts.LoadDialog();
+	}
+
+	SpecialDialog = SDLG_NONE; // menu done
+	R->EAX(SDLG_NONE);         // fall through the re-executed switch to the default case's vanilla loop-exit.
+	return 0;
+}
+
+
 /**
  *  Returns to Queue_AI_Multiplayer's caller. The freeze hook below fires at the
  *  function's entry, before its prologue, so the stack is just the return
@@ -145,6 +215,16 @@ using SendPacketsFunc = int(__fastcall*)(void*, char*, int, int, int);
 DEFINE_HOOK(0x6475F0, QueueAIMultiplayer_FreezeForPendingLoad, 0x5)
 {
 	if (!SessionExt::PendingMultiplayerSaveLoadTime.has_value())
+		return 0;
+
+	// Don't freeze while an in-game menu / dialog is open (SpecialDialog != 0). The
+	// host schedules the load from inside the load dialog, whose own pump runs
+	// Main_Loop -> Queue_AI_Multiplayer; freezing there (nested in the dialog's loop,
+	// a second Main_Loop on the stack) crashes the host. Defer until the menu closes,
+	// so the freeze runs from the main loop - exactly as it does on the clients,
+	// which schedule from normal play. (During a desync the game is suspended, so
+	// this path is never reached there.)
+	if (SpecialDialog != SDLG_NONE)
 		return 0;
 
 	// Session networking globals the function itself reads (see the YR

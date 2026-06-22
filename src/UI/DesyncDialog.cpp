@@ -56,11 +56,13 @@
 #include <IPXManagerClass.h>
 #include <WWMouseClass.h>
 #include <LoadOptionsClass.h>
+#include <StringTable.h>
 #include <Unsorted.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <string>
 #include <system_error>
@@ -276,8 +278,15 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 			 *  Picking one is intercepted (LoadOptionsDialog_InterceptMultiplayerLoad)
 			 *  and turned into a scheduled, broadcast reload; the countdown above
 			 *  then runs. Multiplayer saves use the ".NET" extension.
+			 *
+			 *  The heartbeat timer is deliberately LEFT RUNNING here: the load
+			 *  dialog has its own message loop (which can stay open for a while as
+			 *  the host browses), and the timer still fires for our disabled window,
+			 *  so the other players keep getting our heartbeats and don't time us out
+			 *  and drop the connection. The actual save load / player-list rebuild
+			 *  happens later in Spawner::After_Main_Loop, after this dialog (and its
+			 *  timers) is destroyed, so there is no rebuild to race against here.
 			 */
-			KillTimer(Window, HEARTBEAT_TIMER);
 			EnableWindow(Window, FALSE);
 
 			LoadOptionsClass opts;
@@ -286,7 +295,6 @@ DesyncDialogOutcomeType DesyncDialogClass::Run()
 
 			EnableWindow(Window, TRUE);
 			SetFocus(GetDlgItem(Window, IDC_DESYNC_PLAYER_LIST));
-			SetTimer(Window, HEARTBEAT_TIMER, HEARTBEAT_INTERVAL_MS, nullptr);
 		}
 
 		Decision = 0;
@@ -917,18 +925,26 @@ void DesyncDialogClass::Update_Countdown_Text()
 	}
 	LastCountdownSecond = seconds;
 
-	char buf[64];
-	std::snprintf(buf, std::size(buf), "Loading the saved game in %d second%s...", seconds, seconds == 1 ? "" : "s");
-	SetDlgItemText(Window, IDC_DESYNC_COUNTDOWN_TEXT, buf);
+	/**
+	 *  Take the format string from the string table so it can be localised
+	 *  ("Loading the saved game in %d second%s..."), then fill in the count and
+	 *  plural. (The label is fetched here and formatted - the owner-draw framework
+	 *  would otherwise just draw the raw "%d" placeholders.)
+	 */
+	const wchar_t* fmt = StringTable::TryFetchString("GUI:DesyncLoadingCountdown", L"Loading the saved game in %d second%s...");
+	wchar_t buf[128];
+	std::swprintf(buf, std::size(buf), fmt, seconds, seconds == 1 ? L"" : L"s");
+	SetDlgItemTextW(Window, IDC_DESYNC_COUNTDOWN_TEXT, buf);
 }
 
 
 /**
- *  Draws the load countdown progress bar, the same way the engine's reconnect
- *  dialog draws its per-player sync bars (dialog proc 0x64AE50, in WM_PAINT):
- *  map the placeholder control to surface coordinates with GetDisplayRect, then
- *  fill a shrinking rectangle on the back buffer (DSurface::Alternate). Called
- *  from Dialog_Proc on WM_PAINT, after the framework has painted the dialog.
+ *  Draws the load countdown progress bar over the placeholder groupbox. Maps the
+ *  control to surface coordinates the same way Vinifera's desync dialog does -
+ *  relative to the game window's client area, which is what the back buffer
+ *  (DSurface::Alternate) maps to - so the fill lines up exactly with the
+ *  framework-drawn groupbox. Called from Dialog_Proc on WM_PAINT, after the
+ *  framework has painted the dialog.
  */
 void DesyncDialogClass::Draw_Countdown_Bar(HWND window)
 {
@@ -942,17 +958,21 @@ void DesyncDialogClass::Draw_Countdown_Bar(HWND window)
 	}
 
 	/**
-	 *  Map the placeholder control to display (surface) coordinates, the way the
-	 *  engine's own in-game dialogs position their owner-draw graphics.
+	 *  The placeholder control's rectangle, made relative to the client area of
+	 *  the game's window (which is what the game surfaces map to).
 	 */
-	RECT rect {};
-	UI::GetDisplayRect(bar, &rect);
+	RECT winrect {};
+	GetWindowRect(bar, &winrect);
+
+	RECT client {};
+	GetClientRect(Game::hWnd, &client);
+	ClientToScreen(Game::hWnd, reinterpret_cast<POINT*>(&client));
 
 	RectangleStruct bar_rect;
-	bar_rect.X = rect.left;
-	bar_rect.Y = rect.top;
-	bar_rect.Width = rect.right - rect.left;
-	bar_rect.Height = rect.bottom - rect.top;
+	bar_rect.X = winrect.left - client.left;
+	bar_rect.Y = winrect.top - client.top;
+	bar_rect.Width = winrect.right - winrect.left;
+	bar_rect.Height = winrect.bottom - winrect.top;
 
 	using namespace std::chrono;
 	int remaining = static_cast<int>(duration_cast<milliseconds>(*SessionExt::PendingMultiplayerSaveLoadTime - steady_clock::now()).count());

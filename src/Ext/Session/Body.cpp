@@ -285,6 +285,14 @@ bool SessionExt::Load_Multiplayer_Save(const char* filename)
 		return false;
 	}
 
+	// Re-enter the in-game frame the load tore down. The load (and its "please wait"
+	// box) leaves the in-game-frame flag (Session+0x30D8) clear and the mouse
+	// uncaptured; Resume re-sets the flag, re-captures the mouse and re-locks input.
+	// Without it the mouse is glitchy and, worse, the in-game options menu's
+	// owner-draw layout takes the menu-style branch and dereferences a null
+	// menu-only asset (UI_60B000) -> crash when the host reopens the menu after a load.
+	SessionClass::Instance.Resume();
+
 	Debug::Log("SessionExt: multiplayer save load complete.\n");
 	return true;
 }

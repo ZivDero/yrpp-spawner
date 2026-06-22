@@ -64,32 +64,32 @@ namespace
 	}
 }
 
-DEFINE_HOOK(0x55DCA3, MainLoop_TestForceDesync, 0x5)
-{
-	static int last_frame = -1;
-	static bool announced = false;
-
-	const int frame = Unsorted::CurrentFrame;
-
-	// Re-arm for each new game (the frame counter restarts from zero).
-	if (frame < last_frame)
-		announced = false;
-	last_frame = frame;
-
-	if (!SessionClass::IsMultiplayer() || frame < 1000 || frame > 1100)
-		return 0;
-
-	if (!Is_Designated_Desync_Machine())
-		return 0;
-
-	if (!announced) {
-		announced = true;
-		Debug::Log("TEST: desyncing this machine (local house %d) over frames 100-200.\n",
-			HouseClass::CurrentPlayer->ArrayIndex);
-	}
-
-	// Burn an extra synced random number each frame so this machine's state
-	// diverges from everyone else's; the offset persists and is detected.
-	ScenarioClass::Instance->Random.Random();
-	return 0;
-}
+//DEFINE_HOOK(0x55DCA3, MainLoop_TestForceDesync, 0x5)
+//{
+//	static int last_frame = -1;
+//	static bool announced = false;
+//
+//	const int frame = Unsorted::CurrentFrame;
+//
+//	// Re-arm for each new game (the frame counter restarts from zero).
+//	if (frame < last_frame)
+//		announced = false;
+//	last_frame = frame;
+//
+//	if (!SessionClass::IsMultiplayer() || frame < 1000 || frame > 1100)
+//		return 0;
+//
+//	if (!Is_Designated_Desync_Machine())
+//		return 0;
+//
+//	if (!announced) {
+//		announced = true;
+//		Debug::Log("TEST: desyncing this machine (local house %d) over frames 100-200.\n",
+//			HouseClass::CurrentPlayer->ArrayIndex);
+//	}
+//
+//	// Burn an extra synced random number each frame so this machine's state
+//	// diverges from everyone else's; the offset persists and is detected.
+//	ScenarioClass::Instance->Random.Random();
+//	return 0;
+//}
